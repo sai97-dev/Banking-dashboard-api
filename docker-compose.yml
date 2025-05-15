@@ -1,0 +1,130 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: banking_postgres
+    environment:
+      POSTGRES_DB: banking_db
+      POSTGRES_USER: banking_user
+      POSTGRES_PASSWORD: banking_pass
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./services/account-service/src/db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U banking_user -d banking_db']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: banking_redis
+    ports:
+      - '6379:6379'
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.4.0
+    container_name: banking_zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+
+  kafka:
+    image: confluentinc/cp-kafka:7.4.0
+    container_name: banking_kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - '9092:9092'
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+
+  account-service:
+    build:
+      context: ./services/account-service
+      dockerfile: Dockerfile
+    container_name: account_service
+    ports:
+      - '3001:3001'
+    environment:
+      NODE_ENV: development
+      PORT: 3001
+      POSTGRES_URI: postgresql://banking_user:banking_pass@postgres:5432/banking_db
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    volumes:
+      - ./services/account-service:/app
+      - /app/node_modules
+
+  payment-service:
+    build:
+      context: ./services/payment-service
+      dockerfile: Dockerfile
+    container_name: payment_service
+    ports:
+      - '3002:3002'
+    environment:
+      NODE_ENV: development
+      PORT: 3002
+      POSTGRES_URI: postgresql://banking_user:banking_pass@postgres:5432/banking_db
+      REDIS_URL: redis://redis:6379
+      KAFKA_BROKER: kafka:9092
+      JWT_SECRET: ${JWT_SECRET}
+    depends_on:
+      - postgres
+      - redis
+      - kafka
+
+  notification-service:
+    build:
+      context: ./services/notification-service
+      dockerfile: Dockerfile
+    container_name: notification_service
+    ports:
+      - '3003:3003'
+    environment:
+      NODE_ENV: development
+      PORT: 3003
+      KAFKA_BROKER: kafka:9092
+      REDIS_URL: redis://redis:6379
+    depends_on:
+      - kafka
+      - redis
+
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: banking_client
+    ports:
+      - '3000:3000'
+    environment:
+      REACT_APP_ACCOUNT_API_URL: http://localhost:3001/api
+      REACT_APP_PAYMENT_API_URL: http://localhost:3002/api
+      REACT_APP_NOTIFICATION_API_URL: http://localhost:3003/api
+    depends_on:
+      - account-service
+      - payment-service
+      - notification-service
+    volumes:
+      - ./client:/app
+      - /app/node_modules
+
+volumes:
+  postgres_data:
+  redis_data:
